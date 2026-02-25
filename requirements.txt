@@ -1,0 +1,10 @@
+python-dotenv
+langchain
+langchain-core
+langchain-anthropic
+pyyaml
+python-pptx
+fastapi
+uvicorn[standard]
+python-multipart
+mcp[cli]
