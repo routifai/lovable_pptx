@@ -1,15 +1,69 @@
 "use client";
 
-import { useState, useRef } from "react";
-import { Send, Download, Loader2, Sparkles, FileText, CheckCircle2, Wrench, ChevronRight } from "lucide-react";
+import { useState, useRef, useMemo } from "react";
+import {
+  Send,
+  Download,
+  Loader2,
+  Sparkles,
+  FileText,
+  CheckCircle2,
+  Wrench,
+  ChevronRight,
+  Layers,
+  AlertCircle,
+} from "lucide-react";
+
+type OutlineItem = { index: number; title: string; layout: string };
+
+type PlanEvent = {
+  type: "plan";
+  deck_title: string;
+  slide_count: number;
+  theme: {
+    palette: Record<string, string>;
+    fonts: Record<string, string>;
+    layout_size: string;
+    motif: string;
+  };
+  outline: OutlineItem[];
+};
+
+type SlideStarted = {
+  type: "slide_started";
+  index: number;
+  total: number;
+  title: string;
+};
+
+type SlideDone = {
+  type: "slide_done";
+  index: number;
+  total: number;
+  elapsed_s?: number;
+};
+
+type SlideFailed = {
+  type: "slide_failed";
+  index: number;
+  total: number;
+  error: string;
+  elapsed_s?: number;
+};
 
 type StreamEvent =
   | { type: "status"; message: string }
   | { type: "tool_call"; tool: string; message: string }
   | { type: "tool_result"; tool: string; message: string }
   | { type: "agent_message"; message: string }
+  | PlanEvent
+  | SlideStarted
+  | SlideDone
+  | SlideFailed
   | { type: "done"; file: string | null; message: string }
   | { type: "error"; message: string };
+
+type SlideStatus = "pending" | "in_progress" | "done" | "failed";
 
 interface LogEntry {
   id: number;
@@ -22,8 +76,20 @@ export default function Home() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [finalFile, setFinalFile] = useState<string | null>(null);
   const [isDone, setIsDone] = useState(false);
+  const [plan, setPlan] = useState<PlanEvent | null>(null);
+  const [slideStatus, setSlideStatus] = useState<Record<number, SlideStatus>>({});
   const logRef = useRef<HTMLDivElement>(null);
   const idRef = useRef(0);
+
+  const progress = useMemo(() => {
+    if (!plan) return { done: 0, failed: 0, total: 0, percent: 0 };
+    const total = plan.slide_count || 0;
+    const values = Object.values(slideStatus);
+    const done = values.filter((s) => s === "done").length;
+    const failed = values.filter((s) => s === "failed").length;
+    const percent = total > 0 ? Math.round(((done + failed) / total) * 100) : 0;
+    return { done, failed, total, percent };
+  }, [plan, slideStatus]);
 
   const appendLog = (event: StreamEvent) => {
     setLog((prev) => {
@@ -43,6 +109,8 @@ export default function Home() {
     setLog([]);
     setFinalFile(null);
     setIsDone(false);
+    setPlan(null);
+    setSlideStatus({});
 
     try {
       const response = await fetch("http://localhost:8000/api/generate", {
@@ -73,7 +141,18 @@ export default function Home() {
               const event: StreamEvent = JSON.parse(line.slice(6));
               appendLog(event);
 
-              if (event.type === "done") {
+              if (event.type === "plan") {
+                setPlan(event);
+                const init: Record<number, SlideStatus> = {};
+                for (const s of event.outline) init[s.index] = "pending";
+                setSlideStatus(init);
+              } else if (event.type === "slide_started") {
+                setSlideStatus((prev) => ({ ...prev, [event.index]: "in_progress" }));
+              } else if (event.type === "slide_done") {
+                setSlideStatus((prev) => ({ ...prev, [event.index]: "done" }));
+              } else if (event.type === "slide_failed") {
+                setSlideStatus((prev) => ({ ...prev, [event.index]: "failed" }));
+              } else if (event.type === "done") {
                 setFinalFile(event.file);
                 setIsDone(true);
                 setIsLoading(false);
@@ -175,6 +254,73 @@ export default function Home() {
         {/* Live Stream Log */}
         {log.length > 0 && (
           <div className="w-full max-w-2xl mt-8 space-y-4">
+            {/* Plan + per-slide progress (parallel pipeline) */}
+            {plan && (
+              <div className="bg-[#0e0e0e]/80 border border-white/10 rounded-2xl p-5 backdrop-blur-md shadow-xl space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-gradient-to-tr from-blue-500/30 to-yellow-400/20 rounded-xl">
+                      <Layers className="w-5 h-5 text-blue-300" />
+                    </div>
+                    <div>
+                      <div className="font-bold text-white text-base leading-tight">
+                        {plan.deck_title}
+                      </div>
+                      <div className="text-xs text-zinc-500 mt-0.5">
+                        {plan.slide_count} slides · {plan.theme.layout_size} · motif:{" "}
+                        <span className="text-zinc-400 italic">{plan.theme.motif}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {["primary", "secondary", "accent"].map((k) =>
+                      plan.theme.palette[k] ? (
+                        <div
+                          key={k}
+                          title={`${k}: #${plan.theme.palette[k]}`}
+                          className="w-5 h-5 rounded-full border border-white/20 shadow-inner"
+                          style={{ backgroundColor: `#${plan.theme.palette[k]}` }}
+                        />
+                      ) : null
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between text-xs text-zinc-400 mb-2 font-mono">
+                    <span>
+                      {progress.done}/{progress.total} rendered
+                      {progress.failed > 0 ? (
+                        <span className="text-red-400">  ·  {progress.failed} failed</span>
+                      ) : null}
+                    </span>
+                    <span>{progress.percent}%</span>
+                  </div>
+                  <div className="h-2 bg-white/5 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-500 to-yellow-400 transition-all duration-300"
+                      style={{ width: `${progress.percent}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-56 overflow-y-auto pr-1">
+                  {plan.outline.map((slide) => {
+                    const status = slideStatus[slide.index] ?? "pending";
+                    return (
+                      <SlideRow
+                        key={slide.index}
+                        index={slide.index}
+                        title={slide.title}
+                        layout={slide.layout}
+                        status={status}
+                      />
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Download card on completion */}
             {isDone && finalFile && (
               <div className="bg-[#111]/80 border border-white/10 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 backdrop-blur-md shadow-xl animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -220,12 +366,93 @@ export default function Home() {
   );
 }
 
+function SlideRow({
+  index,
+  title,
+  layout,
+  status,
+}: {
+  index: number;
+  title: string;
+  layout: string;
+  status: SlideStatus;
+}) {
+  const dot =
+    status === "done" ? (
+      <CheckCircle2 className="w-3.5 h-3.5 text-green-400 shrink-0" />
+    ) : status === "in_progress" ? (
+      <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
+    ) : status === "failed" ? (
+      <AlertCircle className="w-3.5 h-3.5 text-red-400 shrink-0" />
+    ) : (
+      <div className="w-2 h-2 rounded-full bg-zinc-700 ml-1 mr-1" />
+    );
+  return (
+    <div className="flex items-center gap-2 text-xs text-zinc-300 bg-black/30 rounded-lg px-2.5 py-1.5 border border-white/5">
+      {dot}
+      <span className="font-mono text-zinc-500 w-6 shrink-0">#{index}</span>
+      <span className="truncate flex-1">{title}</span>
+      <span className="text-[10px] uppercase tracking-wider text-zinc-600 font-semibold shrink-0">
+        {layout.replace(/_/g, " ")}
+      </span>
+    </div>
+  );
+}
+
 function LogLine({ event }: { event: StreamEvent }) {
   if (event.type === "status") {
     return (
       <div className="flex items-start gap-2 text-zinc-400">
         <ChevronRight className="w-3.5 h-3.5 mt-0.5 shrink-0 text-zinc-600" />
         <span>{event.message}</span>
+      </div>
+    );
+  }
+
+  if (event.type === "plan") {
+    return (
+      <div className="flex items-start gap-2 text-blue-300">
+        <Layers className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <span>
+          Plan ready: <span className="font-semibold">{event.deck_title}</span> ·{" "}
+          {event.slide_count} slides
+        </span>
+      </div>
+    );
+  }
+
+  if (event.type === "slide_started") {
+    return (
+      <div className="flex items-start gap-2 text-zinc-500">
+        <Loader2 className="w-3.5 h-3.5 mt-0.5 shrink-0 animate-spin text-blue-400" />
+        <span>
+          Slide {event.index}/{event.total}: <span className="text-zinc-300">{event.title}</span>
+        </span>
+      </div>
+    );
+  }
+
+  if (event.type === "slide_done") {
+    return (
+      <div className="flex items-start gap-2 text-green-400">
+        <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <span>
+          Slide {event.index}/{event.total} rendered
+          {event.elapsed_s !== undefined ? (
+            <span className="text-zinc-500"> · {event.elapsed_s}s</span>
+          ) : null}
+        </span>
+      </div>
+    );
+  }
+
+  if (event.type === "slide_failed") {
+    return (
+      <div className="flex items-start gap-2 text-red-400">
+        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+        <span>
+          Slide {event.index}/{event.total} failed: <span className="text-zinc-400">{event.error}</span>
+        </span>
       </div>
     );
   }
